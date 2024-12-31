@@ -1,0 +1,229 @@
+_schema-version: '3.1'
+ID: Purchaseorder
+version: 1.0.0
+description: A simple CAP project.
+parameters:
+  deploy_mode: html5-repo
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - rm -rf build/dist
+        - mkdir -p build/dist
+        - rm -rf build/ui-deployer
+        - mkdir -p build/ui-deployer
+    - builder: custom
+      commands:
+        - npm install --production
+        - >-
+          bash -c "cds -v | grep 'cds-dk' || npm i --production --no-save
+          @sap/cds-dk @sap/mdk-tools"
+        - bash -c "export PATH=$PATH:$(pwd)/node_modules/.bin"
+        - cds build --production
+  after-all:
+    - builder: custom
+      commands:
+        - npm install
+modules:
+  - name: Purchaseorder-purchaseorder.myapplication
+    type: html5
+    path: app/purchaseorder.myapplication
+    build-parameters:
+      builder: custom
+      commands:
+        - rm -rf dist-zip dist
+        - npm install
+        - >-
+          npx -p @ui5/cli@^3.0.0 ui5 build --dest dist
+          --include-task=generateCachebusterInfo
+        - mkdir dist-zip
+        - >-
+          bash -c "cd dist && npx bestzip
+          ../dist-zip/purchaseordermyapplication.zip *"
+      _artifactName: purchaseordermyapplication.zip
+      supported-platforms: []
+      build-result: dist-zip
+  - name: Purchaseorder-db-deployer
+    type: hdb
+    path: gen/db
+    parameters:
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm
+      ignore:
+        - node_modules
+        - package-lock.json
+    requires:
+      - name: Purchaseorder-service-uaa
+      - name: Purchaseorder-service-db
+  - name: Purchaseorder-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      memory: 256MB
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+    build-parameters:
+      builder: npm
+      ignore:
+        - node_modules
+        - package-lock.json
+    requires:
+      - name: Purchaseorder-service-uaa
+      - name: Purchaseorder-service-db
+      - name: Purchaseorder-service-destination
+      - name: Purchaseorder-service-metadata
+      - name: Purchaseorder-service-connectivity
+      - name: Purchaseorder-service-logs
+  - name: Purchaseorder-aux-destinations
+    type: com.sap.application.content
+    parameters:
+      content:
+        subaccount:
+          existing_destinations_policy: update
+          destinations:
+            - Authentication: OAuth2UserTokenExchange
+              Name: Purchaseorder-service-uaa
+              ServiceInstanceName: Purchaseorder-uaa
+              ServiceKeyName: Purchaseorder-uaa-key
+              sap.cloud.service: lcap.Purchaseorder
+            - Authentication: OAuth2UserTokenExchange
+              Name: Purchaseorder-app-srv
+              TokenServiceInstanceName: Purchaseorder-uaa
+              TokenServiceKeyName: Purchaseorder-uaa-key
+              URL: ~{srv-api/srv-url}
+              sap.cloud.service: lcap.Purchaseorder
+            - Name: Purchaseorder-service-html5-apps-repo-host
+              ServiceInstanceName: Purchaseorder-html5-apps-repo-host
+              ServiceKeyName: Purchaseorder-html5-apps-repo-host-key
+              sap.cloud.service: lcap.Purchaseorder
+            - Authentication: OAuth2UserTokenExchange
+              Name: Purchaseorder-PurchaseorderService
+              TokenServiceInstanceName: Purchaseorder-uaa
+              TokenServiceKeyName: Purchaseorder-uaa-key
+              URL: ~{srv-api/srv-url}/service/PurchaseorderSvcs
+              sap.cloud.service: lcap.Purchaseorder
+              sap.applicationdevelopment.actions.enabled: false
+              sap.build.usage: CAP
+              sap.processautomation.enabled: false
+              HTML5.DynamicDestination: false
+              WebIDEEnabled: false
+              MobileEnabled: false
+              AppgyverEnabled: false
+    build-parameters:
+      no-source: true
+    requires:
+      - name: Purchaseorder-service-uaa
+        parameters:
+          service-key:
+            name: Purchaseorder-uaa-key
+      - name: srv-api
+      - name: Purchaseorder-service-html5-apps-repo-host
+        parameters:
+          service-key:
+            name: Purchaseorder-html5-apps-repo-host-key
+      - name: Purchaseorder-service-destination
+        parameters:
+          content-target: true
+  - name: Purchaseorder-launchpad
+    type: html5
+    path: build/launchpad
+    build-parameters:
+      builder: custom
+      commands:
+        - npm install
+        - >-
+          npx -p @ui5/cli@^3.0.0 ui5 build --dest dist
+          --include-task=generateCachebusterInfo
+        - bash -c "cd dist && npx bestzip ../../../build/dist/launchpad.zip *"
+        - rm -rf dist
+      _artifactName: launchpad.zip
+      supported-platforms: []
+      build-result: ../../build/dist
+  - name: Purchaseorder-aux-ui-deployer
+    type: com.sap.application.content
+    path: build/ui-deployer
+    build-parameters:
+      build-result: resources
+      requires:
+        - name: Purchaseorder-purchaseorder.myapplication
+          artifacts:
+            - purchaseordermyapplication.zip
+          target-path: resources
+        - name: Purchaseorder-launchpad
+          artifacts:
+            - launchpad.zip
+          target-path: resources
+    requires:
+      - name: Purchaseorder-service-html5-apps-repo-host
+        parameters:
+          content-target: true
+resources:
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-uaa
+    parameters:
+      service: xsuaa
+      service-plan: application
+      service-name: Purchaseorder-uaa
+      path: xs-security.json
+      config:
+        oauth2-configuration:
+          redirect-uris:
+            - https://*.${default-domain}/login/*
+          credential-types:
+            - binding-secret
+            - x509
+        xsappname: Purchaseorder-${space}
+        role-collections:
+          - description: Viewer
+            name: Purchaseorder-Viewer-${space}
+            role-template-references:
+              - $XSAPPNAME.Viewer
+          - description: Manager
+            name: Purchaseorder-Manager-${space}
+            role-template-references:
+              - $XSAPPNAME.Manager
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-db
+    parameters:
+      service: hana
+      service-plan: hdi-shared
+      service-name: Purchaseorder-db
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-destination
+    parameters:
+      service: destination
+      service-plan: lite
+      service-name: Purchaseorder-destination
+      config:
+        HTML5Runtime_enabled: true
+        version: 1.0.0
+  - type: org.cloudfoundry.user-provided-service
+    name: Purchaseorder-service-metadata
+    parameters:
+      service: metadata
+      service-plan: standard
+      service-name: Purchaseorder-metadata
+      config:
+        default-domain: ${default-domain}
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-connectivity
+    parameters:
+      service: connectivity
+      service-plan: lite
+      service-name: Purchaseorder-connectivity
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-logs
+    parameters:
+      service: application-logs
+      service-plan: lite
+      service-name: Purchaseorder-logs
+  - type: org.cloudfoundry.managed-service
+    name: Purchaseorder-service-html5-apps-repo-host
+    parameters:
+      service: html5-apps-repo
+      service-plan: app-host
+      service-name: Purchaseorder-html5-apps-repo-host
